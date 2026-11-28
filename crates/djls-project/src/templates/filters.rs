@@ -28,9 +28,10 @@ pub enum FilterArity {
 /// - Whether the filter expects an argument beyond the value parameter
 /// - Whether that argument is optional (has a default value)
 ///
-/// The first positional parameter is always the value being filtered.
-/// If the function is a method (first param is `self`), `self` is skipped
-/// before identifying the value parameter.
+/// The first positional parameter is always the value being filtered, even
+/// when it is named `self`. Django counts every positional parameter through
+/// `inspect.getfullargspec`, and it cannot register a bound method as a filter
+/// at all, so there is no parameter to skip.
 #[must_use]
 pub(crate) fn extract_filter_arity(func: &StmtFunctionDef) -> FilterArity {
     let params = &func.parameters;
@@ -42,29 +43,15 @@ pub(crate) fn extract_filter_arity(func: &StmtFunctionDef) -> FilterArity {
         .chain(params.args.iter())
         .collect();
 
-    if all_positional.is_empty() {
-        return FilterArity::NoArgument;
-    }
-
-    // Skip `self` if present (method-style filter)
-    let skip_self = usize::from(
-        all_positional
-            .first()
-            .is_some_and(|p| p.parameter.name.as_str() == "self"),
-    );
-
-    // After skipping self, the first param is the value being filtered.
-    // Any additional positional params are the filter's argument(s).
-    let after_self = &all_positional[skip_self..];
-
-    if after_self.len() <= 1 {
-        // Only the value parameter (or no params beyond self)
+    // The first param is the value being filtered. Any additional positional
+    // params are the filter's argument(s).
+    if all_positional.len() <= 1 {
         return FilterArity::NoArgument;
     }
 
     // There's at least one additional parameter beyond the value.
     // Check if the extra parameter(s) have defaults.
-    let extra_params = &after_self[1..];
+    let extra_params = &all_positional[1..];
     if extra_params.iter().all(|p| p.default.is_some()) {
         FilterArity::OptionalArgument
     } else {
@@ -138,39 +125,9 @@ mod tests {
         assert_eq!(arity, FilterArity::OptionalArgument);
     }
 
-    // Method-style filters (with self)
-    // No standard Django filter uses `self` — these test the self-skipping logic
-    // for class-based filter implementations in third-party packages.
-
-    #[test]
-    fn method_style_no_arg() {
-        let source = "def my_filter(self, value):\n    return value.upper()\n";
-        let func = find_function_in_source(source, "my_filter")
-            .expect("expected function should exist in test source");
-        let arity = extract_filter_arity(&func);
-        assert_eq!(arity, FilterArity::NoArgument);
-    }
-
-    #[test]
-    fn method_style_with_arg() {
-        let source = "def my_filter(self, value, arg):\n    return value + arg\n";
-        let func = find_function_in_source(source, "my_filter")
-            .expect("expected function should exist in test source");
-        let arity = extract_filter_arity(&func);
-        assert_eq!(arity, FilterArity::RequiredArgument);
-    }
-
-    #[test]
-    fn method_style_with_optional_arg() {
-        let source = "def my_filter(self, value, arg=\"default\"):\n    return value + arg\n";
-        let func = find_function_in_source(source, "my_filter")
-            .expect("expected function should exist in test source");
-        let arity = extract_filter_arity(&func);
-        assert_eq!(arity, FilterArity::OptionalArgument);
-    }
-
-    // Edge cases — no real filter has zero params or self-only.
-    // These test robustness of the extraction logic.
+    // Edge cases — no real filter has zero params or three required params.
+    // Django rejects every template form of both; `FilterArity` has no value
+    // for that, so these record what extraction returns today.
 
     #[test]
     fn no_params_at_all() {
@@ -182,12 +139,12 @@ mod tests {
     }
 
     #[test]
-    fn self_only() {
-        let source = "def weird_method(self):\n    return 'nothing'\n";
-        let func = find_function_in_source(source, "weird_method")
+    fn three_required_params() {
+        let source = "def my_filter(self, value, arg):\n    return value + arg\n";
+        let func = find_function_in_source(source, "my_filter")
             .expect("expected function should exist in test source");
         let arity = extract_filter_arity(&func);
-        assert_eq!(arity, FilterArity::NoArgument);
+        assert_eq!(arity, FilterArity::RequiredArgument);
     }
 
     // Python 3.8+ positional-only parameters — no Django filter uses these

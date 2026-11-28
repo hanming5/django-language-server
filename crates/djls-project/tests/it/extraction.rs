@@ -5542,9 +5542,10 @@ fn corpus_filter_optional_arg() {
     );
 }
 
-// (b) Edge case — method-style registration (self parameter).
-// Not standard Django — tests that class method registrations handle
-// the extra `self` parameter.
+// (b) Edge case — method-style registration through an instance.
+// Not standard Django: `Library.filter` sets `_filter_name` on the callable,
+// which a bound method rejects with `AttributeError`, so extraction records
+// the symbol without an arity.
 #[test]
 fn golden_filter_method_style() {
     let source = r"
@@ -5562,6 +5563,49 @@ register.filter('upper', StringFilter().upper)
     insta::assert_yaml_snapshot!(
         sorted_snapshot(&result).expect("call-style filter extraction snapshot should serialize")
     );
+}
+
+// Django counts a first parameter named `self` like any other: `self_value`
+// and `self_value_optional` reject `{{ v|f }}` and render `{{ v|f:"a" }}`
+// (checked with Django 4.2, 5.2, and 6.0).
+#[test]
+fn filter_arity_counts_a_first_parameter_named_self() {
+    let source = r#"
+from django import template
+register = template.Library()
+
+@register.filter
+def self_value(self, value):
+    return value
+
+@register.filter
+def self_value_optional(self, value, arg="default"):
+    return value
+
+@register.filter
+def self_positional_only(self, /, value):
+    return value
+
+@register.filter
+def self_only(self):
+    return self
+"#;
+    let result = extract_source(source, "app.templatetags.filters")
+        .expect("self-parameter filter extraction fixture should build");
+    for (name, expected) in [
+        ("self_value", FilterArity::RequiredArgument),
+        ("self_value_optional", FilterArity::RequiredArgument),
+        ("self_positional_only", FilterArity::RequiredArgument),
+        ("self_only", FilterArity::NoArgument),
+    ] {
+        assert_eq!(
+            result
+                .filter_arities
+                .get(&SymbolKey::filter("app.templatetags.filters", name)),
+            Some(&expected),
+            "{name}"
+        );
+    }
 }
 
 // (b) Edge case — non-bits variable name in split_contents.
